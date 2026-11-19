@@ -1718,7 +1718,7 @@ document.addEventListener('click', e => {
   if (ds.menunew !== undefined){ for (let i = 0; i < 7; i++) MEALS.forEach(m => { const o = DISHES[m]; menu[i][m] = o[(i * 3 + MEALS.indexOf(m) + Math.floor(Math.random() * o.length)) % o.length]; }); render(); toast('Nuevo menú propuesto'); return; }
   if (ds.shop){ shopDone.has(ds.shop) ? shopDone.delete(ds.shop) : shopDone.add(ds.shop); render(); return; }
   if (ds.shopadd !== undefined){ const v = $('#shop-in').value.trim(); if (!v){ $('#shop-in').focus(); return; } shopExtra.push(v); render(); return; }
-  if (ds.syncgo !== undefined){ syncCfg.user = $('#gh-u').value.trim(); syncCfg.repo = $('#gh-r').value.trim() || 'agenda-datos'; syncCfg.token = $('#gh-t').value.trim(); if (!syncCfg.user || !syncCfg.token){ toast('Escribe tu usuario y la clave.'); return; } syncState.err = null; try { localStorage.setItem(SYNC_KEY, JSON.stringify(syncCfg)); } catch(_){} const st = $('#sync-st'); if (st) st.textContent = 'Sincronizando…'; syncNow(false).then(() => { if ($('#gh-u')) openSync(); }); return; }
+  if (ds.syncgo !== undefined){ syncCfg.user = $('#gh-u').value.trim(); syncCfg.repo = $('#gh-r').value.trim() || 'agenda-datos'; syncCfg.token = $('#gh-t').value.replace(/[^\x21-\x7E]/g, ''); syncCfg.user = syncCfg.user.replace(/\s/g, ''); syncCfg.repo = syncCfg.repo.replace(/\s/g, ''); if (!syncCfg.user || !syncCfg.token){ toast('Escribe tu usuario y la clave.'); return; } if (!/^(github_pat_|ghp_)/.test(syncCfg.token)){ toast('La clave debe empezar por github_pat_ (ahora empieza por «' + syncCfg.token.slice(0, 6) + '»).'); return; } syncState.err = null; try { localStorage.setItem(SYNC_KEY, JSON.stringify(syncCfg)); } catch(_){} const st = $('#sync-st'); if (st) st.textContent = 'Sincronizando…'; syncNow(false).then(() => { if ($('#gh-u')) openSync(); }); return; }
   if (ds.syncoff !== undefined){ syncCfg = {}; syncState = {busy:false, last:null, err:null}; try { localStorage.removeItem(SYNC_KEY); } catch(_){} openSync(); toast('Desconectado. Tus datos siguen en este dispositivo.'); return; }
   if (ds.export !== undefined){ exportData(); return; }
   if (ds.import !== undefined){ $('#imp-in').click(); return; }
@@ -1800,6 +1800,7 @@ let syncState = {busy:false, last:syncCfg.last || null, err:null}, syncT = null;
 const b64e = str => { const bytes = new TextEncoder().encode(str); let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(bin); };
 const b64d = b64 => new TextDecoder().decode(Uint8Array.from(atob(b64.replace(/\n/g, '')), c => c.charCodeAt(0)));
 function scheduleSync(){ if (!syncCfg.token) return; clearTimeout(syncT); syncT = setTimeout(() => syncNow(true), 4000); }
+async function ghMsg(r){ try { return (await r.json()).message || ''; } catch(e){ return ''; } }
 async function gh(path, opts){
   const r = await fetch('https://api.github.com/repos/' + encodeURIComponent(syncCfg.user) + '/' + encodeURIComponent(syncCfg.repo) + '/contents/' + path, Object.assign({headers:{Authorization:'Bearer ' + syncCfg.token, Accept:'application/vnd.github+json', 'X-GitHub-Api-Version':'2022-11-28'}, cache:'no-store'}, opts || {}));
   return r;
@@ -1813,8 +1814,10 @@ async function syncNow(quiet){
     let remote = null, sha;
     const r = await gh(DATA_FILE);
     if (r.status === 200){ const j = await r.json(); sha = j.sha; remote = JSON.parse(b64d(j.content)); }
-    else if (r.status === 401 || r.status === 403) throw new Error('La clave no es válida o no tiene permiso para ese repositorio.');
-    else if (r.status === 404 && !(await gh('')).ok) throw new Error('No encuentro el repositorio «' + syncCfg.repo + '» de ' + syncCfg.user + '.');
+    else if (r.status === 401) throw new Error('GitHub no reconoce la clave (401). Revisa que esté copiada entera: ' + syncCfg.token.length + ' caracteres, empieza por «' + syncCfg.token.slice(0, 11) + '».');
+    else if (r.status === 403) throw new Error('La clave no tiene permiso de escritura en «' + syncCfg.repo + '» (403: ' + (await ghMsg(r)) + ').');
+    else if (r.status === 404){ const t = await gh(''); if (!t.ok) throw new Error('No encuentro el repositorio «' + syncCfg.user + '/' + syncCfg.repo + '» con esta clave (' + t.status + '). Comprueba el nombre y que la clave tenga acceso a ese repositorio.'); }
+    else if (r.status !== 200) throw new Error('GitHub ha respondido ' + r.status + ': ' + (await ghMsg(r)));
     let merged = snapshot(), mergedMeta = Object.assign({}, meta), pull = false, push = !remote;
     if (remote){
       Object.keys(PERSIST).forEach(k => {
@@ -1828,7 +1831,7 @@ async function syncNow(quiet){
       const body = {message:'Sincronización ' + new Date().toISOString(), content:b64e(JSON.stringify({v:1, data:snapshot(), meta})), sha};
       const w = await gh(DATA_FILE, {method:'PUT', body:JSON.stringify(body)});
       if (w.status === 409 || w.status === 422){ syncState.busy = false; return syncNow(quiet); }
-      if (!w.ok) throw new Error('GitHub no ha aceptado los cambios (' + w.status + ').');
+      if (!w.ok) throw new Error('GitHub no ha aceptado los cambios (' + w.status + ': ' + (await ghMsg(w)) + ').' + (w.status === 403 ? ' Falta el permiso Contents: Read and write.' : ''));
     }
     syncState.last = Date.now(); syncState.err = null; syncCfg.last = syncState.last; localStorage.setItem(SYNC_KEY, JSON.stringify(syncCfg));
     if (pull) render();
@@ -1850,7 +1853,7 @@ function openSync(){
     '<div class="card" style="box-shadow:none"><div class="eyebrow"><span>Estado</span></div><div class="meta" style="margin-top:6px" id="sync-st">' + syncLabel() + '</div></div>' +
     '<div class="fld" style="margin-top:14px"><label for="gh-u">Usuario de GitHub</label><input class="inp" id="gh-u" value="' + esc(syncCfg.user || '') + '" placeholder="tu-usuario" autocomplete="off" autocapitalize="off" spellcheck="false"></div>' +
     '<div class="fld"><label for="gh-r">Repositorio privado para los datos</label><input class="inp" id="gh-r" value="' + esc(syncCfg.repo || 'agenda-datos') + '" autocomplete="off" autocapitalize="off" spellcheck="false"></div>' +
-    '<div class="fld"><label for="gh-t">Clave de acceso (token)</label><input class="inp" id="gh-t" type="password" value="' + esc(syncCfg.token || '') + '" placeholder="github_pat_…" autocomplete="off"><div class="meta" style="font-size:.76rem">Se guarda solo en este dispositivo. Nunca se sube a ningún sitio salvo a GitHub.</div></div>' +
+    '<div class="fld"><label for="gh-t">Clave de acceso (token)</label><input class="inp" id="gh-t" type="text" value="' + esc(syncCfg.token || '') + '" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" style="font-family:ui-monospace,Menlo,monospace;font-size:.8rem"><div class="meta" style="font-size:.76rem">Se guarda solo en este dispositivo. Nunca se sube a ningún sitio salvo a GitHub.</div></div>' +
     '<div class="two" style="margin-bottom:14px"><button class="btn primary" type="button" data-syncgo>Conectar y sincronizar</button>' + (syncCfg.token ? '<button class="btn ghost" type="button" data-syncoff>Desconectar</button>' : '') + '</div>' +
     '<div class="sect">Copia de seguridad</div><div class="two"><button class="cta" type="button" data-export>Exportar copia</button><button class="cta" type="button" data-import>Importar copia</button></div><input type="file" id="imp-in" accept=".json,application/json" hidden></div>';
 }
