@@ -1097,7 +1097,7 @@ function openCardio(){
   $('#layer').onclick = e => { const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.ctipo){ read(); s.tipo = b.dataset.ctipo; draw(); }
     else if (b.dataset.cfeel){ read(); s.feel = +b.dataset.cfeel; draw(); }
-    else if (b.hasAttribute('data-csave')){ read(); cardioLog.unshift({d:TS, tipo:s.tipo, km:s.km, min:s.min + s.sec/60, feel:s.feel, note:$('#c-note').value}); doneDays.add(TS); closeLayer(); toast('Cardio guardado'); } };
+    else if (b.hasAttribute('data-csave')){ read(); cardioLog.unshift({id:'c' + Date.now(), d:TS, tipo:s.tipo, km:s.km, min:s.min + s.sec/60, feel:s.feel, note:$('#c-note').value}); doneDays.add(TS); closeLayer(); toast('Cardio guardado'); } };
 }
 function openPlanDay(i){
   $('#layer').innerHTML = '<div class="scrim" data-close></div><div class="sheet" role="dialog" aria-label="Plan del día"><div class="grab"></div><h2>' + WDL[i] + '</h2><p class="lead">¿Qué toca este día?</p><div class="list">' +
@@ -1534,7 +1534,7 @@ function render(){
   $('#fab').hidden = tab !== 'hoy' && tab !== 'agenda';
   const hd = document.querySelector('#main .hdr');
   save();
-  if (hd && !hd.querySelector('[data-settings]')){ const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;gap:8px;align-items:center'; if (hd.children.length > 1) wrap.appendChild(hd.lastElementChild); wrap.insertAdjacentHTML('beforeend', '<button class="icon-btn" type="button" data-settings aria-label="Ajustes">' + ICON.gear + '</button>'); hd.appendChild(wrap); }
+  if (hd && !hd.querySelector('[data-settings]')){ const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;gap:8px;align-items:center'; if (hd.children.length > 1) wrap.appendChild(hd.lastElementChild); wrap.insertAdjacentHTML('beforeend', '<button class="icon-btn" type="button" data-settings aria-label="Ajustes" style="position:relative">' + ICON.gear + '<i id="sync-dot" style="display:none;position:absolute;top:6px;right:6px;width:9px;height:9px;border-radius:50%;background:var(--hi)"></i></button>'); hd.appendChild(wrap); }
 }
 
 // ---------- hoja de tarea ----------
@@ -1719,6 +1719,7 @@ document.addEventListener('click', e => {
   if (ds.shop){ shopDone.has(ds.shop) ? shopDone.delete(ds.shop) : shopDone.add(ds.shop); render(); return; }
   if (ds.shopadd !== undefined){ const v = $('#shop-in').value.trim(); if (!v){ $('#shop-in').focus(); return; } shopExtra.push(v); render(); return; }
   if (ds.syncgo !== undefined){ syncCfg.user = $('#gh-u').value.trim(); syncCfg.repo = $('#gh-r').value.trim() || 'agenda-datos'; syncCfg.token = $('#gh-t').value.replace(/[^\x21-\x7E]/g, ''); syncCfg.user = syncCfg.user.replace(/\s/g, ''); syncCfg.repo = syncCfg.repo.replace(/\s/g, ''); if (!syncCfg.user || !syncCfg.token){ toast('Escribe tu usuario y la clave.'); return; } if (!/^(github_pat_|ghp_)/.test(syncCfg.token)){ toast('La clave debe empezar por github_pat_ (ahora empieza por «' + syncCfg.token.slice(0, 6) + '»).'); return; } syncState.err = null; try { localStorage.setItem(SYNC_KEY, JSON.stringify(syncCfg)); } catch(_){} const st = $('#sync-st'); if (st) st.textContent = 'Sincronizando…'; syncNow(false).then(() => { if ($('#gh-u')) openSync(); }); return; }
+  if (ds.syncforce){ if (b.dataset.armed !== '1'){ b.dataset.armed = '1'; b.innerHTML = '<b>¿Seguro?</b><br><span class="meta">pulsa otra vez para confirmar</span>'; setTimeout(() => { if (document.body.contains(b)) openSync(); }, 4000); return; } syncForce(ds.syncforce); return; }
   if (ds.syncoff !== undefined){ syncCfg = {}; syncState = {busy:false, last:null, err:null}; try { localStorage.removeItem(SYNC_KEY); } catch(_){} openSync(); toast('Desconectado. Tus datos siguen en este dispositivo.'); return; }
   if (ds.export !== undefined){ exportData(); return; }
   if (ds.import !== undefined){ $('#imp-in').click(); return; }
@@ -1765,14 +1766,40 @@ const PERSIST = {
   home:[() => ({order, hidden:[...hiddenCards]}), v => { order = v.order || order; hiddenCards = new Set(v.hidden || []); ['sueno'].forEach(k => { if (!order.includes(k)) order.push(k); }); }],
   startDate:[() => startDate, v => startDate = v], pomoCfg:[() => pomoCfg, v => pomoCfg = v]
 };
-let lastSaved = {};
+let lastSaved = {}, tombs = {};
+const COLL = {tasks:x => x.id, projects:x => x.id, fixed:x => x.id, goals:x => x.id, people:x => x.id, sessions:x => x.id || x.d + '|' + x.rid + '|' + x.vol,
+  sleep:x => x.d, cardioLog:x => x.id || x.d + '|' + x.tipo + '|' + x.min, measures:x => x.n, doneDays:x => x, shopDone:x => x, shopExtra:x => x, foodx:x => (x.k || [])[0] || x.n};
+const MAPS = {notes:1, timed:1, mealLog:1};
+function collIds(k, v){ if (v == null) return []; if (MAPS[k]) return Object.keys(v); if (COLL[k] && Array.isArray(v)) return v.map(x => String(COLL[k](x))); return null; }
+function trackDeletes(k, oldJ, cur, now){
+  if (!(COLL[k] || MAPS[k]) || oldJ === undefined) return;
+  let old; try { old = collIds(k, JSON.parse(oldJ)); } catch(e){ return; }
+  const ids = collIds(k, cur); if (!old || !ids) return; const set = new Set(ids);
+  old.forEach(id => { if (!set.has(id)) tombs[k + ':' + id] = now; });
+  ids.forEach(id => { delete tombs[k + ':' + id]; });
+}
+function mergeVal(k, L, R, lt, rt){
+  const localNewer = lt >= rt, N = localNewer ? L : R, O = localNewer ? R : L, nt = Math.max(lt, rt), ot = Math.min(lt, rt);
+  const keep = (id, t) => { const d = tombs[k + ':' + id]; return !d || t > d; };
+  if (MAPS[k] && N && O && typeof N === 'object'){ const o = {}; Object.keys(O).forEach(id => { if (keep(id, ot)) o[id] = O[id]; }); Object.keys(N).forEach(id => { if (keep(id, nt)) o[id] = N[id]; }); return o; }
+  if (COLL[k] && Array.isArray(N) && Array.isArray(O)){ const f = x => String(COLL[k](x)), ids = new Set(), out = [];
+    N.forEach(x => { const id = f(x); ids.add(id); if (keep(id, nt)) out.push(x); });
+    O.forEach(x => { const id = f(x); if (!ids.has(id) && keep(id, ot)){ ids.add(id); out.push(x); } });
+    if (k === 'goals' || k === 'projects'){ const om = {}; O.forEach(x => om[f(x)] = x); out.forEach((x, i) => { const o = om[f(x)]; if (o && o !== x && (o.log || x.log)) out[i] = Object.assign({}, x, {log:Object.assign({}, o.log || {}, x.log || {})}); }); }
+    if (k === 'sessions' || k === 'sleep') out.sort((a,b) => String(a.d).localeCompare(String(b.d)));
+    if (k === 'cardioLog') out.sort((a,b) => String(b.d).localeCompare(String(a.d)));
+    return out; }
+  return N;
+}
+const devName = () => /iPhone/.test(navigator.userAgent) ? 'iPhone' : /iPad/.test(navigator.userAgent) ? 'iPad' : /Mac/.test(navigator.userAgent) ? 'Mac' : 'otro dispositivo';
+function writeLocal(data){ localStorage.setItem(STORE_KEY, JSON.stringify({v:1, data:data || snapshot(), meta, tombs})); }
 function snapshot(){ const o = {}; Object.keys(PERSIST).forEach(k => o[k] = PERSIST[k][0]()); return o; }
 function save(){
   try {
     const data = snapshot(), now = Date.now(); let changed = false;
-    Object.keys(data).forEach(k => { const j = JSON.stringify(data[k]); if (lastSaved[k] !== j){ if (lastSaved[k] !== undefined) meta[k] = now; else meta[k] = meta[k] || now; lastSaved[k] = j; changed = true; } });
+    Object.keys(data).forEach(k => { const j = JSON.stringify(data[k]); if (lastSaved[k] !== j){ if (lastSaved[k] !== undefined){ meta[k] = now; trackDeletes(k, lastSaved[k], data[k], now); } else meta[k] = meta[k] || now; lastSaved[k] = j; changed = true; } });
     if (!changed) return;
-    localStorage.setItem(STORE_KEY, JSON.stringify({v:1, data, meta}));
+    writeLocal(data);
     scheduleSync();
   } catch(e){ toast('No se ha podido guardar en este dispositivo. Exporta una copia por si acaso.'); }
 }
@@ -1780,7 +1807,7 @@ function applyData(data){ Object.keys(PERSIST).forEach(k => { if (data[k] !== un
 function load(){
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (raw){ const o = JSON.parse(raw); meta = o.meta || {}; applyData(o.data || {}); }
+    if (raw){ const o = JSON.parse(raw); meta = o.meta || {}; tombs = o.tombs || {}; applyData(o.data || {}); }
   } catch(e){}
   const d = snapshot(); Object.keys(d).forEach(k => lastSaved[k] = JSON.stringify(d[k]));
   rollover();
@@ -1813,24 +1840,35 @@ async function syncNow(quiet){
     save();
     let remote = null, sha;
     const r = await gh(DATA_FILE);
-    if (r.status === 200){ const j = await r.json(); sha = j.sha; remote = JSON.parse(b64d(j.content)); }
+    if (r.status === 200){ const j = await r.json(); sha = j.sha; remote = JSON.parse(b64d(j.content)); syncState.remote = {dev:remote.dev, at:remote.at}; }
     else if (r.status === 401) throw new Error('GitHub no reconoce la clave (401). Revisa que esté copiada entera: ' + syncCfg.token.length + ' caracteres, empieza por «' + syncCfg.token.slice(0, 11) + '».');
     else if (r.status === 403) throw new Error('La clave no tiene permiso de escritura en «' + syncCfg.repo + '» (403: ' + (await ghMsg(r)) + ').');
     else if (r.status === 404){ const t = await gh(''); if (!t.ok) throw new Error('No encuentro el repositorio «' + syncCfg.user + '/' + syncCfg.repo + '» con esta clave (' + t.status + '). Comprueba el nombre y que la clave tenga acceso a ese repositorio.'); }
     else if (r.status !== 200) throw new Error('GitHub ha respondido ' + r.status + ': ' + (await ghMsg(r)));
-    let merged = snapshot(), mergedMeta = Object.assign({}, meta), pull = false, push = !remote;
+    const local = snapshot(), merged = {}, mergedMeta = {};
+    let pull = false, push = !remote;
     if (remote){
+      const rd = remote.data || {}, rm = remote.meta || {}, cut = Date.now() - 120 * 864e5;
+      Object.entries(remote.tombs || {}).forEach(([k, v]) => { if (!tombs[k] || tombs[k] < v) tombs[k] = v; });
+      Object.keys(tombs).forEach(k => { if (tombs[k] < cut) delete tombs[k]; });
       Object.keys(PERSIST).forEach(k => {
-        const rt = (remote.meta || {})[k] || 0, lt = meta[k] || 0;
-        if (remote.data && remote.data[k] !== undefined && rt > lt){ merged[k] = remote.data[k]; mergedMeta[k] = rt; pull = true; }
-        else if (lt > rt || remote.data[k] === undefined) push = true;
+        const lt = meta[k] || 0, rt = rm[k] || 0, L = local[k], R = rd[k];
+        const v = R === undefined ? L : !lt ? R : !rt ? L : mergeVal(k, L, R, lt, rt), vj = JSON.stringify(v);
+        merged[k] = v; if (lt || rt) mergedMeta[k] = Math.max(lt, rt);
+        if (vj !== JSON.stringify(L)) pull = true;
+        if (R === undefined || vj !== JSON.stringify(R) || (mergedMeta[k] || 0) !== rt) push = true;
       });
+      if (JSON.stringify(tombs) !== JSON.stringify(remote.tombs || {})) push = true;
+      if (pull){ applyData(merged); }
+      meta = Object.assign(meta, mergedMeta);
+      const d = snapshot(); Object.keys(d).forEach(k => lastSaved[k] = JSON.stringify(d[k])); writeLocal(d);
     }
-    if (pull){ applyData(merged); meta = mergedMeta; const d = snapshot(); Object.keys(d).forEach(k => lastSaved[k] = JSON.stringify(d[k])); localStorage.setItem(STORE_KEY, JSON.stringify({v:1, data:d, meta})); }
     if (push){
-      const body = {message:'Sincronización ' + new Date().toISOString(), content:b64e(JSON.stringify({v:1, data:snapshot(), meta})), sha};
+      const at = Date.now();
+      const body = {message:'Sincronización desde ' + devName() + ' ' + new Date(at).toISOString(), content:b64e(JSON.stringify({v:2, dev:devName(), at, data:snapshot(), meta, tombs})), sha};
       const w = await gh(DATA_FILE, {method:'PUT', body:JSON.stringify(body)});
       if (w.status === 409 || w.status === 422){ syncState.busy = false; return syncNow(quiet); }
+      if (w.ok) syncState.remote = {dev:devName(), at};
       if (!w.ok) throw new Error('GitHub no ha aceptado los cambios (' + w.status + ': ' + (await ghMsg(w)) + ').' + (w.status === 403 ? ' Falta el permiso Contents: Read and write.' : ''));
     }
     syncState.last = Date.now(); syncState.err = null; syncCfg.last = syncState.last; localStorage.setItem(SYNC_KEY, JSON.stringify(syncCfg));
@@ -1839,14 +1877,32 @@ async function syncNow(quiet){
   } catch(e){
     syncState.err = e.message || 'No se pudo sincronizar.';
     if (!quiet) toast(syncState.err);
-  } finally { syncState.busy = false; const st = document.getElementById('sync-st'); if (st) st.innerHTML = syncLabel(); }
+  } finally { syncState.busy = false; const st = document.getElementById('sync-st'); if (st) st.innerHTML = syncLabel(); const dot = document.getElementById('sync-dot'); if (dot) dot.style.display = syncState.err && syncCfg.token ? 'block' : 'none'; }
 }
 window.addEventListener('online', () => syncNow(true));
 setInterval(() => syncNow(true), 120000);
+async function syncForce(dir){
+  if (!syncCfg.token){ toast('Conecta primero con GitHub.'); return; }
+  syncState.busy = true;
+  try {
+    const r = await gh(DATA_FILE); let sha;
+    if (r.status === 200){ const j = await r.json(); sha = j.sha;
+      if (dir === 'pull'){ const remote = JSON.parse(b64d(j.content)); applyData(remote.data || {}); meta = remote.meta || {}; tombs = remote.tombs || {}; const d = snapshot(); Object.keys(d).forEach(k => lastSaved[k] = JSON.stringify(d[k])); writeLocal(d); syncState.remote = {dev:remote.dev, at:remote.at}; syncState.last = Date.now(); syncState.err = null; render(); openSync(); toast('Datos traídos de GitHub'); return; } }
+    else if (dir === 'pull'){ throw new Error('En GitHub todavía no hay datos (' + r.status + ').'); }
+    const now = Date.now(); Object.keys(PERSIST).forEach(k => meta[k] = now); writeLocal();
+    const at = Date.now(), w = await gh(DATA_FILE, {method:'PUT', body:JSON.stringify({message:'Copia completa desde ' + devName(), content:b64e(JSON.stringify({v:2, dev:devName(), at, data:snapshot(), meta, tombs})), sha})});
+    if (!w.ok) throw new Error('GitHub no ha aceptado los datos (' + w.status + ': ' + (await ghMsg(w)) + ').');
+    syncState.remote = {dev:devName(), at}; syncState.last = at; syncState.err = null; openSync(); toast('Datos de este dispositivo subidos a GitHub');
+  } catch(e){ syncState.err = e.message; toast(e.message); const st = document.getElementById('sync-st'); if (st) st.innerHTML = syncLabel(); }
+  finally { syncState.busy = false; }
+}
 function syncLabel(){
   if (!syncCfg.token) return '<span style="color:var(--mid)">No conectado</span>';
   if (syncState.err) return '<span style="color:var(--hi)">' + esc(syncState.err) + '</span>';
-  return '<span style="color:var(--lo)">Conectado</span> · ' + (syncState.last ? 'última vez ' + new Date(syncState.last).toLocaleString('es-ES', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}) : 'aún sin sincronizar');
+  const f = t => new Date(t).toLocaleString('es-ES', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'});
+  return '<span style="color:var(--lo)">Conectado</span> · ' + (syncState.last ? 'última vez ' + f(syncState.last) : 'aún sin sincronizar') +
+    (syncState.remote && syncState.remote.at ? '<br>En GitHub: lo último lo subió ' + (syncState.remote.dev ? 'el ' + syncState.remote.dev : 'un dispositivo') + ' el ' + f(syncState.remote.at) : '') +
+    '<br>En este ' + devName() + ': ' + tasks.length + ' tareas · ' + sessions.length + ' entrenos · ' + Object.keys(mealLog).length + ' días de comidas · ' + sleep.length + ' noches';
 }
 function openSync(){
   $('#layer').innerHTML = '<div class="scrim" data-close></div><div class="sheet" role="dialog" aria-label="Sincronización y copia"><div class="grab"></div><h2>Sincronización</h2><p class="lead">Tus datos se guardan en tu repositorio privado de GitHub y el Mac y el iPhone se ponen al día solos.</p>' +
@@ -1855,6 +1911,7 @@ function openSync(){
     '<div class="fld"><label for="gh-r">Repositorio privado para los datos</label><input class="inp" id="gh-r" value="' + esc(syncCfg.repo || 'agenda-datos') + '" autocomplete="off" autocapitalize="off" spellcheck="false"></div>' +
     '<div class="fld"><label for="gh-t">Clave de acceso (token)</label><input class="inp" id="gh-t" type="text" value="' + esc(syncCfg.token || '') + '" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" style="font-family:ui-monospace,Menlo,monospace;font-size:.8rem"><div class="meta" style="font-size:.76rem">Se guarda solo en este dispositivo. Nunca se sube a ningún sitio salvo a GitHub.</div></div>' +
     '<div class="two" style="margin-bottom:14px"><button class="btn primary" type="button" data-syncgo>Conectar y sincronizar</button>' + (syncCfg.token ? '<button class="btn ghost" type="button" data-syncoff>Desconectar</button>' : '') + '</div>' +
+    (syncCfg.token ? '<div class="sect">Si un dispositivo no se pone al día</div><div class="two" style="margin-bottom:14px"><button class="cta" type="button" data-syncforce="pull">Traer todo de GitHub<br><span class="meta">reemplaza lo de este ' + devName() + '</span></button><button class="cta" type="button" data-syncforce="push">Subir todo a GitHub<br><span class="meta">reemplaza lo de GitHub</span></button></div>' : '') +
     '<div class="sect">Copia de seguridad</div><div class="two"><button class="cta" type="button" data-export>Exportar copia</button><button class="cta" type="button" data-import>Importar copia</button></div><input type="file" id="imp-in" accept=".json,application/json" hidden></div>';
 }
 function exportData(){
@@ -2054,7 +2111,7 @@ function drawSummary(){
       : '<div class="sheet-actions" style="margin-top:16px"><button class="btn primary" type="button" data-wksave="no">Guardar entreno</button></div>') + '</div></div>';
 }
 function saveSession(){
-  sessions.push({d:TS, rid:wk.rid, dur:wk.sum ? wk.sum.dur : 0, vol:wk.sum ? wk.sum.vol : 0, ex:wk.ex.map(y => ({ex:y.ex, note:y.note || undefined, sets:y.sets.filter(s => s.done).map(s => ({type:s.type, kg:s.kg, reps:s.reps, rir:s.rir || undefined}))}))});
+  sessions.push({id:'s' + Date.now(), d:TS, rid:wk.rid, dur:wk.sum ? wk.sum.dur : 0, vol:wk.sum ? wk.sum.vol : 0, ex:wk.ex.map(y => ({ex:y.ex, note:y.note || undefined, sets:y.sets.filter(s => s.done).map(s => ({type:s.type, kg:s.kg, reps:s.reps, rir:s.rir || undefined}))}))});
   doneDays.add(TS);
 }
 function trProgress(){
